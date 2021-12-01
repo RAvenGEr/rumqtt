@@ -310,6 +310,8 @@ impl Server {
         key_path: &String,
         ca_path: &Option<String>,
     ) -> Result<Option<ServerTLSAcceptor>, Error> {
+        use tokio_rustls::rustls::NoClientAuth;
+
         let (certs, key) = {
             // Get certificates
             let cert_file = File::open(&cert_path);
@@ -338,16 +340,20 @@ impl Server {
         };
 
         let mut server_config = {
-            let mut store = RootCertStore::empty();
             // client authentication with a CA. CA isn't required otherwise
-            if let Some(ca_path) = ca_path {
+            let client_verifier = if let Some(ca_path) = ca_path {
+                let mut store = RootCertStore::empty();
                 let ca_file = File::open(ca_path);
                 let ca_file = ca_file.map_err(|_| Error::CaFileNotFound(ca_path.clone()))?;
                 let ca_file = &mut BufReader::new(ca_file);
                 let o = store.add_pem_file(ca_file);
                 o.map_err(|_| Error::InvalidCACert(ca_path.to_string()))?;
-            }
-            ServerConfig::new(AllowAnyAuthenticatedClient::new(store))
+                AllowAnyAuthenticatedClient::new(store)
+            } else {
+                NoClientAuth::new()
+            };
+            ServerConfig::new(client_verifier)
+            
         };
 
         server_config.set_single_cert(certs, key)?;
