@@ -18,7 +18,7 @@ use tokio::{task, time};
 
 // All requirements for `rustls`
 #[cfg(feature = "use-rustls")]
-use tokio_rustls::rustls::internal::pemfile::{certs, rsa_private_keys};
+use tokio_rustls::rustls::internal::pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 #[cfg(feature = "use-rustls")]
 use tokio_rustls::rustls::{
     AllowAnyAuthenticatedClient, RootCertStore, ServerConfig, TLSError as RustlsError,
@@ -120,7 +120,7 @@ enum ServerTLSAcceptor {
 #[serde(untagged)]
 pub enum ServerCert {
     RustlsCert {
-        ca_path: String,
+        ca_path: Option<String>,
         cert_path: String,
         key_path: String,
     },
@@ -308,7 +308,7 @@ impl Server {
         &self,
         cert_path: &String,
         key_path: &String,
-        ca_path: &String,
+        ca_path: &Option<String>,
     ) -> Result<Option<ServerTLSAcceptor>, Error> {
         let (certs, key) = {
             // Get certificates
@@ -318,28 +318,35 @@ impl Server {
             let certs = certs.map_err(|_| Error::InvalidServerCert(cert_path.to_string()))?;
 
             // Get private key
-            let key_file = File::open(&key_path);
-            let key_file = key_file.map_err(|_| ServerKeyNotFound(key_path.clone()))?;
-            let keys = rsa_private_keys(&mut BufReader::new(key_file));
-            let keys = keys.map_err(|_| Error::InvalidServerKey(key_path.clone()))?;
-
-            // Get the first key
-            let key = match keys.first() {
-                Some(k) => k.clone(),
-                None => return Err(Error::InvalidServerKey(key_path.clone())),
+            let key = {
+                let key_file = File::open(&key_path);
+                let key_file = key_file.map_err(|_| ServerKeyNotFound(key_path.clone()))?;
+                let keys = if let Ok(keys) = pkcs8_private_keys(&mut BufReader::new(&key_file)) {
+                    keys
+                } else {
+                    let key_file = File::open(&key_path).unwrap();
+                    let keys = rsa_private_keys(&mut BufReader::new(key_file));
+                    keys.map_err(|_| Error::InvalidServerKey(key_path.clone()))?
+                };
+                // Get the first key
+                match keys.first() {
+                    Some(k) => k.clone(),
+                    None => return Err(Error::InvalidServerKey(key_path.clone())),
+                }
             };
-
             (certs, key)
         };
 
-        // client authentication with a CA. CA isn't required otherwise
         let mut server_config = {
-            let ca_file = File::open(ca_path);
-            let ca_file = ca_file.map_err(|_| Error::CaFileNotFound(ca_path.clone()))?;
-            let ca_file = &mut BufReader::new(ca_file);
             let mut store = RootCertStore::empty();
-            let o = store.add_pem_file(ca_file);
-            o.map_err(|_| Error::InvalidCACert(ca_path.to_string()))?;
+            // client authentication with a CA. CA isn't required otherwise
+            if let Some(ca_path) = ca_path {
+                let ca_file = File::open(ca_path);
+                let ca_file = ca_file.map_err(|_| Error::CaFileNotFound(ca_path.clone()))?;
+                let ca_file = &mut BufReader::new(ca_file);
+                let o = store.add_pem_file(ca_file);
+                o.map_err(|_| Error::InvalidCACert(ca_path.to_string()))?;
+            }
             ServerConfig::new(AllowAnyAuthenticatedClient::new(store))
         };
 
